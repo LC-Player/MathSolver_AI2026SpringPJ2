@@ -7,10 +7,13 @@ Supports:
   - dpo:     LoRA DPO model (Scheme 3 output)
   - sft_cot: SFT model with CoT prompt
 
+Supports incremental CSV output and range-based processing.
+
 Usage:
     python infer_all.py --mode base --output submit_base.csv
     python infer_all.py --mode sft --lora_path ./output/Qwen_COT --output submit_sft.csv
     python infer_all.py --mode dpo --lora_path ./output/Qwen_DPO --output submit_dpo.csv
+    python infer_all.py --mode base --start 30 --stop 100  # range
     python infer_all.py --mode base --max_samples 10  # quick test
 """
 import argparse
@@ -20,7 +23,7 @@ from modelscope import AutoTokenizer
 from transformers import AutoModelForCausalLM
 from peft import PeftModel
 
-from utils import load_json, save_csv_submit, extract_answer
+from utils import load_json, save_csv_submit, extract_answer, load_csv_submit
 
 INFERENCE_INSTRUCTION = (
     "请逐步推理以下数学应用题，写出完整的解题步骤，"
@@ -77,16 +80,40 @@ def predict(question: str, model, tokenizer, instruction: str, device: str = "cp
 
 
 def run_inference(model, tokenizer, test_data: list, instruction: str,
-                  device: str = "cpu") -> dict:
-    results = {}
-    for item in tqdm(test_data, desc="Inference"):
-        qid = int(item["id"])
-        question = item["question"]
-        response = predict(question, model, tokenizer, instruction, device)
-        answer = extract_answer(response)
-        # Clean up: replace newlines, commas that could break CSV
-        answer = answer.replace('\n', ' ').replace(',', ' ').strip()
-        results[qid] = answer
+                  device: str = "cpu", output_path: str = None,
+                  save_interval: int = 10) -> dict:
+    if output_path is None:
+        output_path = "submit.csv"
+
+    # Resume: load existing results, skip already-processed ids
+    try:
+        existing = load_csv_submit(output_path)
+    except FileNotFoundError:
+        existing = {}
+
+    results = dict(existing)
+    new_count = 0
+
+    with open(output_path, 'a', encoding='utf-8') as f:
+        for item in tqdm(test_data, desc="Inference"):
+            qid = int(item["id"])
+            if qid in results:
+                continue
+
+            question = item["question"]
+            response = predict(question, model, tokenizer, instruction, device)
+            answer = extract_answer(response)
+            answer = answer.replace('\n', ' ').replace(',', ' ').strip()
+            results[qid] = answer
+            new_count += 1
+
+            f.write(f"{qid},{answer}\n")
+            if new_count % save_interval == 0:
+                f.flush()
+                print(f"  Saved {new_count} new predictions (total: {len(results)})")
+
+    saved_new = len(results) - len(existing)
+    print(f"Saved {saved_new} new predictions (total: {len(results)}) to {output_path}")
     return results
 
 
@@ -101,9 +128,16 @@ def main():
     parser.add_argument("--device", default="cpu")
     parser.add_argument("--max_samples", type=int, default=None)
     parser.add_argument("--max_new_tokens", type=int, default=256)
+    parser.add_argument("--start", type=int, default=0,
+                        help="Start index in test.json (inclusive, default 0)")
+    parser.add_argument("--stop", type=int, default=None,
+                        help="Stop index in test.json (exclusive, default until end)")
+    parser.add_argument("--save_interval", type=int, default=10,
+                        help="Flush CSV every N new predictions")
     args = parser.parse_args()
 
     test_data = load_json(args.test_path)
+    test_data = test_data[args.start:args.stop]
     if args.max_samples:
         test_data = test_data[:args.max_samples]
 
@@ -119,11 +153,9 @@ def main():
     else:
         raise ValueError(f"Unknown mode: {args.mode}")
 
-    results = run_inference(model, tokenizer, test_data, instruction, args.device)
-
     output_path = args.output or f"submit_{args.mode}.csv"
-    save_csv_submit(output_path, results)
-    print(f"Saved {len(results)} predictions to {output_path}")
+    run_inference(model, tokenizer, test_data, instruction, args.device,
+                  output_path=output_path, save_interval=args.save_interval)
 
 
 if __name__ == "__main__":
