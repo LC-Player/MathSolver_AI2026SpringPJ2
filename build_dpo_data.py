@@ -42,7 +42,7 @@ def generate_rejected(question: str, client: OpenAI) -> str:
             {"role": "user",
              "content": f"{REJECTED_USER_PROMPT}\n题目：{question}\n"},
         ],
-        max_tokens=1024,
+        max_tokens=2048,
         temperature=0.3,
     )
     return resp.choices[0].message.content

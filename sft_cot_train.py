@@ -76,6 +76,15 @@ def main():
     with open(args.cot_data, 'r', encoding='utf-8') as f:
         cot_data = json.load(f)
 
+    before = len(cot_data)
+    cot_data = [d for d in cot_data
+                if (d.get("reasoning") or "").strip()
+                and (d.get("question") or "").strip()
+                and (d.get("instruction") or "").strip()
+                and (d.get("answer") or "").strip()]
+    if before > len(cot_data):
+        print(f"Filtered {before - len(cot_data)} empty/incomplete samples")
+
     if args.max_samples:
         cot_data = cot_data[:args.max_samples]
 

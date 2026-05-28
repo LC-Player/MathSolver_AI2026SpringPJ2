@@ -77,6 +77,15 @@ def main():
     with open(args.dpo_data, 'r', encoding='utf-8') as f:
         dpo_raw = json.load(f)
 
+    before = len(dpo_raw)
+    dpo_raw = [d for d in dpo_raw
+               if (d.get("chosen") or "").strip()
+               and (d.get("rejected") or "").strip()
+               and (d.get("question") or "").strip()
+               and (d.get("instruction") or "").strip()]
+    if before > len(dpo_raw):
+        print(f"Filtered {before - len(dpo_raw)} empty/incomplete samples")
+
     if args.max_samples:
         dpo_raw = dpo_raw[:args.max_samples]
 
