@@ -5,7 +5,10 @@ Uses DeepSeek API to generate step-by-step reasoning chains
 for each training sample. The answer is provided as a hint so the model
 can work backwards to produce correct reasoning.
 
-Output: train_cot.json with fields: id, question, answer, reasoning, instruction
+Supports incremental range generation: loads existing train_cot.json,
+skips already-generated ids, appends/overwrites by id.
+
+Output: train_cot.json — list of {id, question, answer, reasoning, instruction}
 """
 import argparse
 import time
@@ -81,10 +84,21 @@ def augment_numbers(question: str, answer: str) -> list:
     return augmented
 
 
+def load_existing_output(path: str) -> list:
+    try:
+        return load_json(path)
+    except (FileNotFoundError, json.JSONDecodeError):
+        return []
+
+
 def main():
     parser = argparse.ArgumentParser(description="Build CoT training data")
     parser.add_argument("--train_path", default="train.json")
     parser.add_argument("--output_path", default="train_cot.json")
+    parser.add_argument("--start", type=int, default=0,
+                        help="Start index in train.json (inclusive, default 0)")
+    parser.add_argument("--stop", type=int, default=None,
+                        help="Stop index in train.json (exclusive, default until end)")
     parser.add_argument("--max_samples", type=int, default=None,
                         help="Limit to N samples (for quick testing)")
     parser.add_argument("--augment", action="store_true",
@@ -98,46 +112,66 @@ def main():
     client = build_client()
     train_data = load_json(args.train_path)
 
+    train_data = train_data[args.start:args.stop]
     if args.max_samples:
         train_data = train_data[:args.max_samples]
 
-    cot_data = []
+    # Resume support: load existing output, build id→index map
+    cot_data = load_existing_output(args.output_path)
+    id_to_idx = {item["id"]: i for i, item in enumerate(cot_data)}
+    save_counter = 0
+
     for idx, item in enumerate(tqdm(train_data, desc="Generating CoT data")):
+        item_id = str(item["id"])
+        global_idx = args.start + idx
+
+        if item_id in id_to_idx:
+            print(f"\n[{global_idx+1}] Skipped: already exists (id={item_id})")
+            continue
+
         question = (item.get("question") or "").strip()
         answer = (item.get("answer") or "").strip()
 
         if not question or not answer:
-            print(f"\n[{idx+1}] Skipped: empty question or answer (id={item.get('id', '?')})")
+            print(f"\n[{global_idx+1}] Skipped: empty question or answer (id={item_id})")
             continue
 
         try:
             reasoning = generate_reasoning(question, answer, client)
         except Exception as e:
-            print(f"\n[{idx+1}] Error on sample {item.get('id', '?')}: {e}")
+            print(f"\n[{global_idx+1}] Error on sample {item_id}: {e}")
             reasoning = ""
 
         reasoning = (reasoning or "").strip()
         if not reasoning:
-            print(f"\n[{idx+1}] Skipped: empty reasoning for Q: {question[:50]}...")
+            print(f"\n[{global_idx+1}] Skipped: empty reasoning for Q: {question[:50]}...")
             continue
 
-        cot_data.append({
-            "id": item["id"],
+        cot_item = {
+            "id": item_id,
             "question": question,
             "answer": answer,
             "reasoning": reasoning,
             "instruction": COT_SYSTEM_PROMPT,
-        })
+        }
+        cot_data.append(cot_item)
+        id_to_idx[item_id] = len(cot_data) - 1
+        save_counter += 1
 
-        print(f"\n[{idx+1}] Q: {question[:50]}...")
+        print(f"\n[{global_idx+1}] Q: {question[:50]}...")
         print(f"    A: {answer}")
 
         if args.augment:
             for aug_q, aug_a in augment_numbers(question, answer):
+                aug_id = f"{item_id}_aug"
+                if aug_id in id_to_idx:
+                    print(f"    [AUG] Skipped: already exists (id={aug_id})")
+                    continue
+
                 try:
                     aug_reasoning = generate_reasoning(aug_q, aug_a, client)
                 except Exception as e:
-                    print(f"    [AUG] Error on id={item.get('id', '?')}: {e}")
+                    print(f"    [AUG] Error on id={item_id}: {e}")
                     aug_reasoning = ""
 
                 aug_reasoning = (aug_reasoning or "").strip()
@@ -145,17 +179,20 @@ def main():
                     print(f"    [AUG] Skipped: empty reasoning")
                     continue
 
-                cot_data.append({
-                    "id": f"{item['id']}_aug",
+                aug_item = {
+                    "id": aug_id,
                     "question": aug_q,
                     "answer": aug_a,
                     "reasoning": aug_reasoning,
                     "instruction": COT_SYSTEM_PROMPT,
-                })
+                }
+                cot_data.append(aug_item)
+                id_to_idx[aug_id] = len(cot_data) - 1
+                save_counter += 1
                 print(f"    [AUG] Q: {aug_q[:50]}...")
                 print(f"           A: {aug_a}")
 
-        if len(cot_data) % args.save_interval == 0 and len(cot_data) > 0:
+        if save_counter > 0 and save_counter % args.save_interval == 0:
             save_json(cot_data, args.output_path)
             print(f"    Saved {len(cot_data)} samples to {args.output_path}")
 

@@ -4,10 +4,12 @@ Scheme 3 — Phase 1: Build DPO preference data.
 Reuses CoT-generated reasoning (from train_cot.json) as the "chosen" response,
 and only calls DeepSeek API to generate "rejected" (flawed) reasoning per sample.
 
-Supports --watch mode for parallel run with build_cot_data.py:
-the script polls train_cot.json and processes new samples as they appear.
+Supports incremental range generation: loads existing train_dpo.json,
+skips already-generated ids, appends/overwrites by id.
 
-Output: train_dpo.json with fields: question, instruction, chosen, rejected
+Supports --watch mode for parallel run with build_cot_data.py.
+
+Output: train_dpo.json — list of {id, question, instruction, chosen, rejected}
 """
 import argparse
 import time
@@ -46,50 +48,68 @@ def generate_rejected(question: str, client: OpenAI) -> str:
     return resp.choices[0].message.content
 
 
-def safe_load_cot(path: str):
-    """Load train_cot.json, retrying on JSON decode errors (file may be mid-write)."""
+def get_base_id(item_id) -> int:
+    """Extract the train.json row index from a CoT data id (e.g. '123' or '123_aug' → 123)."""
+    return int(str(item_id).split("_")[0])
+
+
+def safe_load_json(path: str) -> list:
+    """Load a JSON list, retrying on decode errors (file may be mid-write)."""
     for attempt in range(3):
         try:
-            return load_json(path)
+            data = load_json(path)
+            if isinstance(data, list):
+                return data
         except (json.JSONDecodeError, ValueError):
             if attempt < 2:
                 time.sleep(2)
     return load_json(path)
 
 
-def process_sample(item: dict, sample_idx: int, client: OpenAI) -> dict | None:
+def load_existing_output(path: str) -> list:
+    try:
+        data = load_json(path)
+        if isinstance(data, list):
+            return data
+    except (FileNotFoundError, json.JSONDecodeError):
+        pass
+    return []
+
+
+def process_sample(item: dict, item_id: str, client: OpenAI) -> dict | None:
     """Process one CoT sample into a DPO pair. Returns None if skipped."""
     question = (item.get("question") or "").strip()
     chosen = (item.get("reasoning") or "").strip()
     instruction = (item.get("instruction") or "").strip()
 
     if not question:
-        print(f"\n[{sample_idx+1}] Skipped: empty question (id={item.get('id', '?')})")
+        print(f"  Skipped: empty question (id={item_id})")
         return None
 
     if not chosen:
-        print(f"\n[{sample_idx+1}] Skipped: empty reasoning for Q: {question[:60]}...")
+        print(f"  Skipped: empty reasoning for Q: {question[:60]}...")
         return None
 
     if not instruction:
-        print(f"\n[{sample_idx+1}] Skipped: empty instruction for Q: {question[:60]}...")
+        print(f"  Skipped: empty instruction for Q: {question[:60]}...")
         return None
 
     try:
         rejected = generate_rejected(question, client)
     except Exception as e:
-        print(f"\n[{sample_idx+1}] Error on rejected: {e}")
+        print(f"  Error on rejected (id={item_id}): {e}")
         return None
 
     rejected = (rejected or "").strip()
     if not rejected:
-        print(f"\n[{sample_idx+1}] Skipped: empty rejected for Q: {question[:60]}...")
+        print(f"  Skipped: empty rejected for Q: {question[:60]}...")
         return None
 
-    print(f"\n[{sample_idx+1}] Q: {question[:60]}...")
-    print(f"    [CHOSEN] {chosen[:100]}...")
-    print(f"    [REJECT] {rejected[:100]}...")
+    print(f"  Q: {question[:60]}...")
+    print(f"  [CHOSEN] {chosen[:100]}...")
+    print(f"  [REJECT] {rejected[:100]}...")
     return {
+        "id": item_id,
         "question": question,
         "instruction": instruction,
         "chosen": chosen,
@@ -102,12 +122,16 @@ def main():
     parser.add_argument("--cot_path", default="train_cot.json",
                         help="Path to CoT-augmented training data")
     parser.add_argument("--output_path", default="train_dpo.json")
+    parser.add_argument("--start", type=int, default=0,
+                        help="Start train.json index (inclusive, default 0)")
+    parser.add_argument("--stop", type=int, default=None,
+                        help="Stop train.json index (exclusive, default until end)")
     parser.add_argument("--max_samples", type=int, default=None,
-                        help="Limit to N samples total")
+                        help="Max new samples to generate in this run")
     parser.add_argument("--sleep", type=float, default=0.5,
                         help="Sleep between API calls in seconds")
     parser.add_argument("--save_interval", type=int, default=25,
-                        help="Save data every N samples")
+                        help="Save data every N new samples")
     parser.add_argument("--watch", action="store_true",
                         help="Keep polling cot_path for new samples (parallel run with build_cot_data.py)")
     parser.add_argument("--watch_interval", type=float, default=15.0,
@@ -118,46 +142,63 @@ def main():
 
     client = build_client()
 
-    dpo_data = []
-    processed_count = 0
+    dpo_data = load_existing_output(args.output_path)
+    existing_ids = {item["id"] for item in dpo_data}
+    processed_keys = set(existing_ids)  # includes failed attempts (within this session)
+    new_in_run = 0
     empty_polls = 0
+    range_stop = args.stop if args.stop is not None else float("inf")
 
     while True:
-        cot_data = safe_load_cot(args.cot_path)
+        cot_data = safe_load_json(args.cot_path)
 
-        if args.max_samples and processed_count >= args.max_samples:
-            break
+        # Collect in-range items not yet processed
+        pending = []
+        for item in cot_data:
+            item_id = str(item.get("id", ""))
+            base_id = get_base_id(item_id)
+            if not (args.start <= base_id < range_stop):
+                continue
+            if item_id in processed_keys:
+                continue
+            pending.append(item)
 
-        new_items = cot_data[processed_count:]
-        if args.max_samples:
-            remaining = args.max_samples - processed_count
-            new_items = new_items[:remaining]
+        # Apply max_samples limit to new items
+        if args.max_samples is not None:
+            remaining = args.max_samples - new_in_run
+            if remaining <= 0:
+                break
+            pending = pending[:remaining]
 
-        if not new_items:
+        if not pending:
             if not args.watch:
                 break
             empty_polls += 1
             if empty_polls >= args.watch_retries:
                 print(f"\nNo new samples after {args.watch_retries} consecutive polls, stopping.")
                 break
-            print(f"\nNo new samples in {args.cot_path} (total={len(cot_data)}, "
-                  f"processed={processed_count}), waiting {args.watch_interval}s... "
+            print(f"\nNo new in-range samples (total in file={len(cot_data)}, "
+                  f"in range processed={len(processed_keys)}, "
+                  f"dpo pairs={len(dpo_data)}), waiting {args.watch_interval}s... "
                   f"({empty_polls}/{args.watch_retries})")
             time.sleep(args.watch_interval)
             continue
 
         empty_polls = 0
-        print(f"\nProcessing {len(new_items)} new sample(s) "
-              f"(total in file: {len(cot_data)}, processed so far: {processed_count})")
+        print(f"\nFound {len(pending)} new sample(s) to process "
+              f"(total in file={len(cot_data)}, dpo pairs={len(dpo_data)})")
 
-        for item in tqdm(new_items, desc="Building DPO data", unit="sample"):
-            result = process_sample(item, processed_count, client)
-            processed_count += 1
+        for item in tqdm(pending, desc="Building DPO data", unit="sample"):
+            item_id = str(item["id"])
+            processed_keys.add(item_id)
 
+            result = process_sample(item, item_id, client)
             if result:
                 dpo_data.append(result)
+                existing_ids.add(item_id)
+                new_in_run += 1
 
-            if len(dpo_data) % args.save_interval == 0 and len(dpo_data) > 0:
+            if new_in_run > 0 and new_in_run % args.save_interval == 0:
                 save_json(dpo_data, args.output_path)
                 print(f"    Saved {len(dpo_data)} pairs to {args.output_path}")
 
@@ -165,11 +206,12 @@ def main():
                 time.sleep(args.sleep)
 
         save_json(dpo_data, args.output_path)
-        print(f"Checkpoint: {len(dpo_data)} DPO pairs saved (processed {processed_count}/{len(cot_data)} CoT samples)")
+        print(f"Checkpoint: {len(dpo_data)} DPO pairs saved")
 
         if not args.watch:
             break
 
+    save_json(dpo_data, args.output_path)
     print(f"\nCompleted: {len(dpo_data)} DPO preference pairs saved to {args.output_path}")
 
 
