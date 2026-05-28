@@ -30,14 +30,17 @@
 
 ```bash
 # 1. 克隆项目（如果你是直接拷贝代码，跳过这一步）
-git clone <your-repo> math_solver && cd math_solver
+git clone https://github.com/LC-Player/MathSolver_AI2026SpringPJ2.git math_solver && cd math_solver
 
-# 2. 创建 conda 环境
+# 2. 如果使用本地PC跑跑的话
+# 2.1  创建 conda 环境 
 conda create -n math_solver python=3.10 -y
 conda activate math_solver
 
-# 3. 安装依赖
+# 2.2  安装依赖
 pip install -r requirements.txt
+
+# 如果用远程跑的话，视情况安装 transformers modelscope peft swanlab
 ```
 
 ### 下载模型
