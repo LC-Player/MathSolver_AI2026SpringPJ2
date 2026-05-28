@@ -18,7 +18,7 @@ from openai import OpenAI
 from tqdm import tqdm
 
 from config import DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
-from utils import load_json, save_json
+from utils import load_json, save_json, normalize_question
 
 REJECTED_SYSTEM_PROMPT = "你是一个能够处理数学问题的智能AI助手"
 
@@ -78,7 +78,7 @@ def load_existing_output(path: str) -> list:
 
 def process_sample(item: dict, item_id: str, client: OpenAI) -> dict | None:
     """Process one CoT sample into a DPO pair. Returns None if skipped."""
-    question = (item.get("question") or "").strip()
+    question = normalize_question(item.get("question"))
     chosen = (item.get("reasoning") or "").strip()
     instruction = (item.get("instruction") or "").strip()
 

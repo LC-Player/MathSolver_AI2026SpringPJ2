@@ -4,7 +4,14 @@ Used by all scheme scripts to avoid duplication.
 """
 import re
 import json
-from typing import List, Optional
+from typing import List, Optional, Union
+
+
+def normalize_question(question) -> str:
+    """Normalize a question field that may be a string or a list of strings."""
+    if isinstance(question, list):
+        return "".join(str(p) for p in question)
+    return str(question) if question else ""
 
 
 def extract_answer(text: str) -> str:

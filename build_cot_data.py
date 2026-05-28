@@ -18,7 +18,7 @@ from openai import OpenAI
 from tqdm import tqdm
 
 from config import DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
-from utils import load_json, save_json
+from utils import load_json, save_json, normalize_question
 
 COT_SYSTEM_PROMPT = (
     "你是一个小学数学老师。给你一道应用题和它的正确答案，"
@@ -129,8 +129,8 @@ def main():
             print(f"\n[{global_idx+1}] Skipped: already exists (id={item_id})")
             continue
 
-        question = (item.get("question") or "").strip()
-        answer = (item.get("answer") or "").strip()
+        question = normalize_question(item.get("question"))
+        answer = str(item.get("answer", "")).strip()
 
         if not question or not answer:
             print(f"\n[{global_idx+1}] Skipped: empty question or answer (id={item_id})")
