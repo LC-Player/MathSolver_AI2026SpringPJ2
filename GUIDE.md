@@ -171,39 +171,54 @@ python infer_all.py --mode dpo --lora_path ./output/Qwen_DPO
 
 ### 文件之间的依赖关系
 
-```
-train.json ──────────────────────────────────────────────┐
-                                                        │
-方案1（不训练）:                                          │
-  cot_prompting.py ───→ submit_cot_{mode}.csv            │
-                                                        │
-方案2（训练）:                                            │
-  train.json ──→ build_cot_data.py ──→ train_cot.json    │
-                                         │               │
-                                         ▼               │
-                                   sft_cot_train.py      │
-                                         │               │
-                           ./output/Qwen_COT/            │
-                                         │               │
-                                         ▼               │
-                                   infer_all.py ──→ submit_sft.csv
-                                                        │
-方案3（训练）:                                            │
-  train.json ──→ build_dpo_data.py ──→ train_dpo.json    │
-                                         │               │
-                                         ▼               │
-                                    dpo_train.py         │
-                                         │               │
-                           ./output/Qwen_DPO/            │
-                                         │               │
-                                         ▼               │
-                                   infer_all.py ──→ submit_dpo.csv
+```mermaid
+graph TD
+    %% 全局核心数据
+    train_json[train.json]
 
-评估:
-  submit_*.csv ──→ evaluate.py ──→ 准确率（对照 train.json）
-  submit_*.csv ──→ 提交到比赛平台 ──→ 平台得分
-```
+    %% 方案1
+    subgraph 方案1: 不训练
+        cot_prompting[cot_prompting.py] --> submit_cot[submit_cot_`mode`.csv]
+    end
 
+    train_json --> build_cot[build_cot_data.py]
+    %% 方案2
+    subgraph 方案2: SFT 训练
+        build_cot --> train_cot_json[train_cot.json]
+        train_cot_json --> sft_cot_train[sft_cot_train.py]
+        sft_cot_train --> output_qwen_cot[./output/Qwen_COT/]    
+        output_qwen_cot --> infer_all_sft[infer_all.py]
+        infer_all_sft --> submit_sft[submit_sft.csv]
+    end
+
+    train_json --> build_dpo[build_dpo_data.py]
+    %% 方案3
+    subgraph 方案3: DPO 训练
+        build_dpo --> train_dpo_json[train_dpo.json]
+        train_dpo_json --> dpo_train[dpo_train.py]
+        dpo_train --> output_qwen_dpo[./output/Qwen_DPO/]
+        output_qwen_dpo --> infer_all_dpo[infer_all.py]
+        infer_all_dpo --> submit_dpo[submit_dpo.csv]
+    end
+
+    %% 评估阶段
+    subgraph 评估与提交
+        submit_all[submit_*.csv] --> platform[提交到比赛平台] --> score[平台得分]
+        submit_all --> evaluate[evaluate.py]
+        
+        %% 映射具体的csv到通用集合
+        submit_cot -.-> submit_all
+        submit_dpo -.-> submit_all
+        submit_sft -.-> submit_all
+    end
+
+    %% 评估对照
+    train_json -. 准确率对照 .-> evaluate
+
+    %% 样式调整（可选，让文件和脚本区分更明显）
+    style train_json fill:#f9f,stroke:#333,stroke-width:2px
+    style submit_all fill:#bbf,stroke:#333,stroke-width:2px
+```
 ---
 
 ## 按课程要求你需要做的事
@@ -242,3 +257,138 @@ train.json ───────────────────────
 2. **跑方案2**（数据构建 + SFT）→ 在 GPU 上跑完整训练
 3. **跑方案3**（DPO）→ 依赖方案2的 CoT 数据
 4. **写报告**（4 页）→ 分析三种方案的效果差异
+
+---
+
+## 进一步探索指南
+
+上面三个方案是基础框架。以下从"学习理解"和"改进扩展"两个维度，告诉你还能做什么、怎么做。
+
+### 第零步：从 TA 材料到当前代码的学习路径
+
+如果你对 LLM 微调不熟悉，建议按以下顺序阅读和理解：
+
+**1. 先理解数据（10 分钟）**
+
+打开 `train.json`，看 20~30 条数据，理解：
+- 题目类型：加减乘除、分数小数、行程问题、工程问题等
+- 答案格式：整数（`315`）、小数（`7.5`）、分数（`4/5`）
+- instruction 字段：告诉模型"直接输出数字答案"
+
+**2. 理解 baseline（20 分钟）**
+
+打开 `qwen_ft.py`，一行行读：
+- 第 10~30 行 `process_func`：如何把 Q&A 对转成训练格式。关键是 `labels = [-100] * len(instruction) + response` —— 只在答案部分计算 loss。
+- 第 32~36 行：ModelScope 下载模型 → transformers 加载。
+- 第 47~56 行：LoRA 配置 —— `r=8` 是低秩矩阵的维度（越小参数越少），`target_modules` 是插入 LoRA 的层。
+- 第 58~69 行：TrainingArguments —— `per_device_train_batch_size`、`num_train_epochs`、`learning_rate`。
+
+然后读 `infer.py`：看如何用 `apply_chat_template` 构造 prompt，用 `model.generate` 做推理。
+
+**3. 对比理解方案1：CoT 提示词（30 分钟）**
+
+打开 `cot_prompting.py`，对比 baseline 的关键差异：
+- Baseline 的 instruction："无需进行分析，请直接输出数字答案"
+- CoT 的 instruction："请一步一步地推理，最后以'答案是[数字]'给出最终答案"
+
+**不需要训练**，只改了 prompt，就能提升准确率（本地验证 0% → 60%）。这说明 prompt engineering 本身就是一种有效的方案。
+
+再打开 `utils.py`，找到 `FEW_SHOT_EXAMPLES`——这是手写的 4 道带推理步骤的例题。Few-shot CoT 把这些例题塞进 prompt，让模型模仿。你可以尝试替换这些例题、增加更多类型。
+
+**4. 对比理解方案2：数据构建 + SFT（40 分钟）**
+
+打开 `build_cot_data.py`：
+- 核心思路：把正确答案告诉模型，让它反推解题过程。
+- `generate_reasoning()` 函数：构造 prompt `"题目：xxx，正确答案是：xxx，请写出解题步骤"`，然后用模型生成推理链。
+- `augment_numbers()` 函数：数据增强 —— 把原题中的数字 ×2、×3、×0.5，生成新题目。
+
+打开 `sft_cot_train.py`：
+- 和 baseline `qwen_ft.py` 结构几乎一样，但训练目标从"直接输出答案"变成了"输出推理步骤+答案"。
+- `process_func()` 中 `target_text = example.get("reasoning", example["answer"])` —— 如果有推理步骤就用推理步骤，否则回退到纯答案。
+
+**5. 对比理解方案3：DPO（40 分钟）**
+
+打开 `build_dpo_data.py`：
+- 对同一道题生成两种推理：`chosen`（给定正确答案）和 `rejected`（给定错误答案或不给提示）。
+- `make_wrong_answer()` 函数故意制造错误答案（+1、-1、+10 等）。
+
+打开 `dpo_train.py`：
+- 不是传统的 loss 函数（交叉熵），而是 DPO loss：让模型对 chosen 输出的概率 > 对 rejected 输出的概率。
+- `beta=0.1` 控制偏离原模型的程度 —— 越小越激进，越大越保守。
+
+### 可以改进的方向
+
+#### A. 改进现有方案（不需要新文件）
+
+| 改进点 | 文件 | 怎么做 |
+|--------|------|--------|
+| **调参** | `sft_cot_train.py` | 试不同 `--learning_rate`（1e-5、5e-5、1e-4）、`--num_epochs`（3/5/10）、LoRA `r`（4/8/16）。这些对最终准确率影响很大。 |
+| **优化 few-shot 例题** | `utils.py` → `FEW_SHOT_EXAMPLES` | 当前只有 4 道例题。从 train.json 中挑选不同类型的题目（行程、工程、分数、几何），手写更多样化的推理示例，覆盖不同题型。 |
+| **改进答案提取** | `utils.py` → `extract_answer()` | 当前用正则。如果模型输出格式不规范（比如 CoT 推理中夹杂多个数字），可能提取错误。可以改成：优先匹配"答案是X"，其次找最后一个数字，再次找 `\boxed{X}`。 |
+| **增强答案提取** | `build_dpo_data.py` → `generate_rejected()` | 当前用错误答案误导模型来生成 rejected。更好的做法：计算 rejected 推理的最终答案是否真的错了，如果碰巧对了就丢弃这对数据。 |
+| **数据增强策略** | `build_cot_data.py` → `augment_numbers()` | 当前只做乘法。可以增加：改人名/物品名、改场景描述、改单位（千克→克），使数据更多样。 |
+
+#### B. 添加新方案（需要新文件）
+
+| 方案 | 工作量 | 说明 |
+|------|--------|------|
+| **方案4：GRPO** | 大 | 参考 [Open-R1](https://github.com/huggingface/open-r1)。每条题让模型生成 4~8 个推理，用规则奖励函数打分（最终答案正确 → +1），组内归一化后更新策略。TRL 库的 `GRPOTrainer` 可直接用。 |
+| **方案X：答案验证器** | 中 | 训练一个小分类器（基于 Qwen-0.5B 的最后 hidden state），判断推理链是否会导致正确答案。用于给 GRPO 提供更精细的奖励信号。 |
+| **方案X：多模型集成** | 小 | 同时用 base 模型和 SFT 模型推理，如果两者答案一致则采纳，不一致则选 CoT 推理步骤更完整的那个。 |
+| **方案X：题目分类 + 专项 prompt** | 小 | 先用简单规则把题目分成加减乘除/分数/行程/几何等类型，每种类型用不同的 few-shot 例题。比如行程问题用"相遇问题"的例题，分数问题用"通分"的例题。 |
+
+#### C. 实验分析（写到报告里）
+
+以下分析不需要改代码，只需要跑实验、记录数据、画图：
+
+1. **消融实验**：分别去掉 CoT prompt、去掉数据增强、去掉 LoRA（全参数微调），看准确率变化多少。
+2. **训练数据量 vs 准确率曲线**：分别用 500/1000/3000/12000 条数据训练，画出准确率随数据量变化的曲线。
+3. **错误分析**：从 SFT 模型预测错误的题目中随机抽 50 道，人工分类：是推理步骤错了，还是计算错了，还是答案提取错了？
+4. **不同题型准确率**：按运算类型（整数四则、分数、小数、混合运算）分组统计准确率，找出模型的弱项。
+
+#### D. 学习 CoT / SFT / DPO 的推荐资源
+
+| 概念 | 推荐资源 |
+|------|----------|
+| CoT | [Chain-of-Thought Prompting Elicits Reasoning in LLMs](https://arxiv.org/abs/2201.11903)（Wei et al., 2022）—— 提出 CoT 的原始论文 |
+| SFT + LoRA | [LoRA: Low-Rank Adaptation of LLMs](https://arxiv.org/abs/2106.09685)（Hu et al., 2021）—— LoRA 原理 |
+| DPO | [Direct Preference Optimization](https://arxiv.org/abs/2305.18290)（Rafailov et al., 2023）—— DPO 原始论文 |
+| GRPO | [DeepSeek-R1](https://arxiv.org/abs/2501.12948) —— GRPO 算法的提出背景 |
+
+### Step-by-step 探索计划
+
+如果你有一台 GPU 服务器和 2~3 天时间，建议按以下节奏推进：
+
+**Day 1：跑通 + 出基线**
+
+```
+上午: 配环境、下模型、跑方案1（CoT 零样本 + 少样本）
+      → 提交两个 csv 到平台，记住分数
+      → 这两个分数就是你的 baseline
+下午: 跑 build_cot_data.py（完整 12000 条）
+      → 耐心等（每条约 10~20 秒推理，总计 1~2 天在单 GPU 上）
+      → 如果太慢，先用 2000 条做实验
+```
+
+**Day 2：训练 + 对比**
+
+```
+上午: sft_cot_train.py（用 Day1 产生的 train_cot.json）
+      → num_epochs=3, batch_size=4, lr=1e-4
+      → 2~4 小时
+下午: infer_all.py --mode sft → 提交到平台看分数
+      → 和 Day1 的 baseline 对比
+      → 如果分数高了，记录；如果没高，分析原因（数据质量？训练不够？）
+```
+
+**Day 3：DPO + 写报告**
+
+```
+上午: build_dpo_data.py → dpo_train.py
+      → infer_all.py --mode dpo → 提交看分数
+下午: 做错误分析（抽 50 道错题看原因）
+      画对比图（方案1 vs 方案2 vs 方案3）
+      写报告
+```
+
+**如果时间紧（只有 1 天）**：只做方案1（不训练） + 写好报告中的实验分析部分。三个方案的工作量分已经到手，关键是把报告写清楚。
