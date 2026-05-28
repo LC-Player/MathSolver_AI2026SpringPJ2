@@ -1,0 +1,19 @@
+__pycache__/
+.lock/
+Qwen/
+output/
+.____temp/
+
+# Generated submission files (keep the original submit.csv)
+submit_cot_*.csv
+submit_sft.csv
+submit_dpo.csv
+submit_base.csv
+
+# Generated training data
+train_cot.json
+train_dpo.json
+
+# Model cache
+.msc/
+.mdl
