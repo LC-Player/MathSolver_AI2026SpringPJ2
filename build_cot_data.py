@@ -102,53 +102,62 @@ def main():
         train_data = train_data[:args.max_samples]
 
     cot_data = []
-    with open(args.output_path, 'w', encoding='utf-8') as f:
-        f.write('[\n')
-
     for idx, item in enumerate(tqdm(train_data, desc="Generating CoT data")):
-        question = item["question"]
-        answer = item["answer"]
+        question = (item.get("question") or "").strip()
+        answer = (item.get("answer") or "").strip()
+
+        if not question or not answer:
+            print(f"\n[{idx+1}] Skipped: empty question or answer (id={item.get('id', '?')})")
+            continue
 
         try:
             reasoning = generate_reasoning(question, answer, client)
         except Exception as e:
-            print(f"Error on sample {item['id']}: {e}")
+            print(f"\n[{idx+1}] Error on sample {item.get('id', '?')}: {e}")
             reasoning = ""
 
-        cot_sample = {
+        reasoning = (reasoning or "").strip()
+        if not reasoning:
+            print(f"\n[{idx+1}] Skipped: empty reasoning for Q: {question[:50]}...")
+            continue
+
+        cot_data.append({
             "id": item["id"],
             "question": question,
             "answer": answer,
             "reasoning": reasoning,
             "instruction": COT_SYSTEM_PROMPT,
-        }
-        cot_data.append(cot_sample)
+        })
 
         print(f"\n[{idx+1}] Q: {question[:50]}...")
         print(f"    A: {answer}")
-        print(f"    R: {reasoning[:100]}..." if reasoning else "    R: (empty)")
 
         if args.augment:
             for aug_q, aug_a in augment_numbers(question, answer):
                 try:
                     aug_reasoning = generate_reasoning(aug_q, aug_a, client)
                 except Exception as e:
-                    print(f"Error on augmented sample {item['id']}: {e}")
+                    print(f"    [AUG] Error on id={item.get('id', '?')}: {e}")
                     aug_reasoning = ""
-                aug_sample = {
+
+                aug_reasoning = (aug_reasoning or "").strip()
+                if not aug_reasoning:
+                    print(f"    [AUG] Skipped: empty reasoning")
+                    continue
+
+                cot_data.append({
                     "id": f"{item['id']}_aug",
                     "question": aug_q,
                     "answer": aug_a,
                     "reasoning": aug_reasoning,
                     "instruction": COT_SYSTEM_PROMPT,
-                }
-                cot_data.append(aug_sample)
+                })
                 print(f"    [AUG] Q: {aug_q[:50]}...")
                 print(f"           A: {aug_a}")
 
-        if len(cot_data) % args.save_interval == 0:
+        if len(cot_data) % args.save_interval == 0 and len(cot_data) > 0:
             save_json(cot_data, args.output_path)
-            print(f"    ✓ Saved {len(cot_data)} samples to {args.output_path}")
+            print(f"    Saved {len(cot_data)} samples to {args.output_path}")
 
         if args.sleep > 0:
             time.sleep(args.sleep)
