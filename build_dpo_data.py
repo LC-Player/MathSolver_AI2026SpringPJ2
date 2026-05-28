@@ -1,7 +1,7 @@
 """
 Scheme 3 — Phase 1: Build DPO preference data.
 
-Strategy: For each training sample, generate TWO reasoning chains:
+Uses DeepSeek API to generate TWO reasoning chains per sample:
   - "chosen": reasoning with the correct answer as hint (should be correct)
   - "rejected": reasoning with a WRONG answer as hint (produces flawed reasoning)
 
@@ -11,12 +11,13 @@ keeping those that produce wrong final answers as extra rejected samples.
 Output: train_dpo.json with fields: question, instruction, chosen, rejected
 """
 import argparse
-import re
-import torch
+import random
+import time
+import json
+from openai import OpenAI
 from tqdm import tqdm
-from modelscope import AutoTokenizer
-from transformers import AutoModelForCausalLM
 
+from config import DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
 from utils import load_json, save_json, extract_answer
 
 DPO_INSTRUCTION = (
@@ -24,58 +25,35 @@ DPO_INSTRUCTION = (
     "最后以\"答案是[数字]\"的格式给出最终答案。"
 )
 
+REJECTED_INSTRUCTION = "你是一个能够处理数学问题的智能AI助手"
 
-def load_model(model_dir: str, device: str = "cpu"):
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_dir, use_fast=False, trust_remote_code=True
+REJECTED_USER_INSTRUCTION = (
+    "你是一个小学数学老师，你需要逐步推理以下应用题。但你今天状态不太好，会犯错误。\n"
+    "请写出看似合理但实则有错误的解题步骤。你可以有以下几种做法：\n"
+    "1. 推理过程中漏掉关键步骤或简化某些计算\n"
+    "2. 使用不严谨的逻辑\n"
+    "3. 过程中有理解偏差，但按照这个偏差推导下去\n"
+    "最后写出一个完全错误的答案，以\"答案是[数字]\"的格式结尾。\n\n"
+    "生成的推理过程应该看起来像是一个参数量很低的小模型的输出。"
+)
+
+
+def build_client() -> OpenAI:
+    return OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
+
+
+def generate_response(messages: list, client: OpenAI, max_tokens: int = 1024) -> str:
+    resp = client.chat.completions.create(
+        model=DEEPSEEK_MODEL,
+        messages=messages,
+        max_tokens=max_tokens,
+        temperature=0.3,
     )
-    model = AutoModelForCausalLM.from_pretrained(
-        model_dir, device_map=device, torch_dtype=torch.float32,
-        trust_remote_code=True
-    )
-    model.eval()
-    return model, tokenizer
-
-
-def generate_response(messages: list, model, tokenizer, device: str = "cpu") -> str:
-    text = tokenizer.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
-    )
-    inputs = tokenizer([text], return_tensors="pt").to(device)
-
-    with torch.no_grad():
-        generated_ids = model.generate(
-            inputs.input_ids,
-            max_new_tokens=256,
-            do_sample=True,
-            temperature=0.3,
-            pad_token_id=tokenizer.pad_token_id,
-        )
-    output_ids = generated_ids[0][len(inputs.input_ids[0]):]
-    return tokenizer.decode(output_ids, skip_special_tokens=True)
-
-
-def generate_chosen(question: str, answer: str, model, tokenizer, device: str) -> str:
-    """Generate correct reasoning by providing the correct answer as hint."""
-    messages = [
-        {"role": "system", "content": DPO_INSTRUCTION},
-        {"role": "user", "content": f"题目：{question}\n正确答案是{answer}，请写出解题步骤。"},
-    ]
-    return generate_response(messages, model, tokenizer, device)
-
-
-def generate_rejected(question: str, model, tokenizer, device: str) -> str:
-    """Generate possibly-incorrect reasoning without hint."""
-    messages = [
-        {"role": "system", "content": DPO_INSTRUCTION},
-        {"role": "user", "content": question},
-    ]
-    return generate_response(messages, model, tokenizer, device)
+    return resp.choices[0].message.content
 
 
 def make_wrong_answer(answer: str) -> str:
     """Generate a deliberately wrong answer for rejected reasoning generation."""
-    import random
     try:
         if '/' in answer:
             num, den = answer.split('/')
@@ -92,58 +70,71 @@ def make_wrong_answer(answer: str) -> str:
 
 def main():
     parser = argparse.ArgumentParser(description="Build DPO preference data")
-    parser.add_argument("--model_dir", default="./Qwen/Qwen2.5-0.5B-Instruct/")
     parser.add_argument("--train_path", default="train.json")
     parser.add_argument("--output_path", default="train_dpo.json")
-    parser.add_argument("--device", default="cpu")
     parser.add_argument("--max_samples", type=int, default=None,
                         help="Limit to N samples")
+    parser.add_argument("--sleep", type=float, default=0.5,
+                        help="Sleep between API calls in seconds")
+    parser.add_argument("--save_interval", type=int, default=25,
+                        help="Save data every N samples")
     args = parser.parse_args()
 
-    model, tokenizer = load_model(args.model_dir, args.device)
+    client = build_client()
     train_data = load_json(args.train_path)
 
     if args.max_samples:
         train_data = train_data[:args.max_samples]
 
     dpo_data = []
-    for item in tqdm(train_data, desc="Building DPO data"):
+    for sample_idx, item in enumerate(tqdm(train_data, desc="Building DPO data")):
         question = item["question"]
         answer = item["answer"]
 
         # Chosen: reasoning with correct answer hint
-        chosen = generate_chosen(question, answer, model, tokenizer, args.device)
+        try:
+            chosen = generate_response([
+                {"role": "system", "content": DPO_INSTRUCTION},
+                {"role": "user",
+                 "content": f"题目：{question}\n正确答案是{answer}，请写出解题步骤。"},
+            ], client)
+        except Exception as e:
+            print(f"Error on chosen for sample {item.get('id', '?')}: {e}")
+            chosen = ""
 
-        # Rejected strategy 1: reasoning with wrong answer hint
-        wrong_answer = make_wrong_answer(answer)
-        rejected_messages = [
-            {"role": "system", "content": DPO_INSTRUCTION},
-            {"role": "user",
-             "content": f"题目：{question}\n正确答案是{wrong_answer}，请写出解题步骤。"},
-        ]
-        rejected = generate_response(rejected_messages, model, tokenizer, args.device)
+        # Rejected: reasoning with error instruction
+        try:
+            rejected = generate_response([
+                {"role": "system", "content": REJECTED_INSTRUCTION},
+                {"role": "user",
+                 "content": f"{REJECTED_USER_INSTRUCTION}\n题目：{question}\n"},
+            ], client, 2048)
+        except Exception as e:
+            print(f"Error on rejected for sample {item.get('id', '?')}: {e}")
+            rejected = ""
 
-        # Rejected strategy 2: direct generation (keep if answer is wrong)
-        direct_response = generate_rejected(question, model, tokenizer, args.device)
-        direct_answer = extract_answer(direct_response)
-        if direct_answer.strip() != answer.strip():
-            # Add as an extra DPO pair with the same chosen
+        if chosen.strip() and rejected.strip():
+            print(f"\n[{sample_idx+1}] Q: {question[:60]}...")
+            print(f"    [CHOSEN] {chosen[:100]}...")
+            print(f"    [REJECT] {rejected[:100]}...")
             dpo_data.append({
                 "question": question,
                 "instruction": DPO_INSTRUCTION,
                 "chosen": chosen,
-                "rejected": direct_response,
+                "rejected": rejected,
             })
+        else:
+            print(f"\n[{sample_idx+1}] ✗ Skipped (empty chosen or rejected)")
 
-        dpo_data.append({
-            "question": question,
-            "instruction": DPO_INSTRUCTION,
-            "chosen": chosen,
-            "rejected": rejected,
-        })
+        if len(dpo_data) % args.save_interval == 0 and len(dpo_data) > 0:
+            save_json(dpo_data, args.output_path)
+            print(f"    ✓ Saved {len(dpo_data)} pairs to {args.output_path}")
+
+        if args.sleep > 0:
+            time.sleep(args.sleep)
 
     save_json(dpo_data, args.output_path)
-    print(f"Saved {len(dpo_data)} DPO preference pairs to {args.output_path}")
+    print(f"\nCompleted: {len(dpo_data)} DPO preference pairs saved to {args.output_path}")
 
 
 if __name__ == "__main__":

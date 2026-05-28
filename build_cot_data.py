@@ -1,18 +1,20 @@
 """
 Scheme 2 — Phase 1: Build CoT-augmented training data.
 
-Uses the base Qwen-0.5B model to generate step-by-step reasoning chains
+Uses DeepSeek API to generate step-by-step reasoning chains
 for each training sample. The answer is provided as a hint so the model
 can work backwards to produce correct reasoning.
 
 Output: train_cot.json with fields: id, question, answer, reasoning, instruction
 """
 import argparse
-import torch
+import time
+import re
+import json
+from openai import OpenAI
 from tqdm import tqdm
-from modelscope import AutoTokenizer
-from transformers import AutoModelForCausalLM
 
+from config import DEEPSEEK_API_KEY, DEEPSEEK_BASE_URL, DEEPSEEK_MODEL
 from utils import load_json, save_json
 
 COT_SYSTEM_PROMPT = (
@@ -22,57 +24,30 @@ COT_SYSTEM_PROMPT = (
 )
 
 
-def build_cot_prompt(question: str, answer: str) -> str:
-    return (
-        f"题目：{question}\n"
-        f"正确答案是：{answer}\n"
-        f"请写出详细的解题步骤。"
-    )
+def build_client() -> OpenAI:
+    return OpenAI(api_key=DEEPSEEK_API_KEY, base_url=DEEPSEEK_BASE_URL)
 
 
-def load_model(model_dir: str, device: str = "cpu"):
-    tokenizer = AutoTokenizer.from_pretrained(
-        model_dir, use_fast=False, trust_remote_code=True
-    )
-    model = AutoModelForCausalLM.from_pretrained(
-        model_dir, device_map=device, torch_dtype=torch.float32,
-        trust_remote_code=True
-    )
-    model.eval()
-    return model, tokenizer
-
-
-def generate_reasoning(question: str, answer: str, model, tokenizer,
-                       device: str = "cpu") -> str:
+def generate_reasoning(question: str, answer: str, client: OpenAI) -> str:
     messages = [
         {"role": "system", "content": COT_SYSTEM_PROMPT},
-        {"role": "user", "content": build_cot_prompt(question, answer)},
+        {"role": "user",
+         "content": f"题目：{question}\n正确答案是：{answer}\n请写出详细的解题步骤。"},
     ]
-    text = tokenizer.apply_chat_template(
-        messages, tokenize=False, add_generation_prompt=True
+    resp = client.chat.completions.create(
+        model=DEEPSEEK_MODEL,
+        messages=messages,
+        max_tokens=1024,
+        temperature=0.3,
     )
-    inputs = tokenizer([text], return_tensors="pt").to(device)
-
-    with torch.no_grad():
-        generated_ids = model.generate(
-            inputs.input_ids,
-            max_new_tokens=256,
-            do_sample=True,
-            temperature=0.3,
-            pad_token_id=tokenizer.pad_token_id,
-        )
-    output_ids = generated_ids[0][len(inputs.input_ids[0]):]
-    return tokenizer.decode(output_ids, skip_special_tokens=True)
+    return resp.choices[0].message.content
 
 
 def augment_numbers(question: str, answer: str) -> list:
     """
     Data augmentation: replace numbers in the question and compute new answer.
     Returns a list of (new_question, new_answer) pairs.
-    This is a simple rule-based augmentation for demonstration.
     """
-    import re
-
     augmented = []
     numbers = re.findall(r'[0-9]+(?:\.[0-9]+)?', question)
 
@@ -87,7 +62,6 @@ def augment_numbers(question: str, answer: str) -> list:
             try:
                 old_num = float(num_str)
                 if '/' in answer:
-                    # Fraction answer: multiply numerator only
                     parts = answer.split('/')
                     new_a = f"{int(int(parts[0]) * mult)}/{parts[1]}"
                 else:
@@ -109,52 +83,78 @@ def augment_numbers(question: str, answer: str) -> list:
 
 def main():
     parser = argparse.ArgumentParser(description="Build CoT training data")
-    parser.add_argument("--model_dir", default="./Qwen/Qwen2.5-0.5B-Instruct/")
     parser.add_argument("--train_path", default="train.json")
     parser.add_argument("--output_path", default="train_cot.json")
-    parser.add_argument("--device", default="cpu")
     parser.add_argument("--max_samples", type=int, default=None,
                         help="Limit to N samples (for quick testing)")
     parser.add_argument("--augment", action="store_true",
                         help="Also generate augmented data by changing numbers")
+    parser.add_argument("--sleep", type=float, default=0.5,
+                        help="Sleep between API calls in seconds")
+    parser.add_argument("--save_interval", type=int, default=25,
+                        help="Save data every N samples")
     args = parser.parse_args()
 
-    model, tokenizer = load_model(args.model_dir, args.device)
+    client = build_client()
     train_data = load_json(args.train_path)
 
     if args.max_samples:
         train_data = train_data[:args.max_samples]
 
     cot_data = []
-    for item in tqdm(train_data, desc="Generating CoT data"):
+    with open(args.output_path, 'w', encoding='utf-8') as f:
+        f.write('[\n')
+
+    for idx, item in enumerate(tqdm(train_data, desc="Generating CoT data")):
         question = item["question"]
         answer = item["answer"]
-        reasoning = generate_reasoning(question, answer, model, tokenizer, args.device)
 
-        cot_data.append({
+        try:
+            reasoning = generate_reasoning(question, answer, client)
+        except Exception as e:
+            print(f"Error on sample {item['id']}: {e}")
+            reasoning = ""
+
+        cot_sample = {
             "id": item["id"],
             "question": question,
             "answer": answer,
             "reasoning": reasoning,
             "instruction": COT_SYSTEM_PROMPT,
-        })
+        }
+        cot_data.append(cot_sample)
 
-        # Also generate augmented variants if requested
+        print(f"\n[{idx+1}] Q: {question[:50]}...")
+        print(f"    A: {answer}")
+        print(f"    R: {reasoning[:100]}..." if reasoning else "    R: (empty)")
+
         if args.augment:
             for aug_q, aug_a in augment_numbers(question, answer):
-                aug_reasoning = generate_reasoning(
-                    aug_q, aug_a, model, tokenizer, args.device
-                )
-                cot_data.append({
+                try:
+                    aug_reasoning = generate_reasoning(aug_q, aug_a, client)
+                except Exception as e:
+                    print(f"Error on augmented sample {item['id']}: {e}")
+                    aug_reasoning = ""
+                aug_sample = {
                     "id": f"{item['id']}_aug",
                     "question": aug_q,
                     "answer": aug_a,
                     "reasoning": aug_reasoning,
                     "instruction": COT_SYSTEM_PROMPT,
-                })
+                }
+                cot_data.append(aug_sample)
+                print(f"    [AUG] Q: {aug_q[:50]}...")
+                print(f"           A: {aug_a}")
+
+        if len(cot_data) % args.save_interval == 0:
+            save_json(cot_data, args.output_path)
+            print(f"    ✓ Saved {len(cot_data)} samples to {args.output_path}")
+
+        if args.sleep > 0:
+            time.sleep(args.sleep)
 
     save_json(cot_data, args.output_path)
-    print(f"Saved {len(cot_data)} CoT-augmented samples to {args.output_path}")
+    print(f"\nCompleted: {len(cot_data)} CoT-augmented samples saved to {args.output_path}")
 
 
 if __name__ == "__main__":

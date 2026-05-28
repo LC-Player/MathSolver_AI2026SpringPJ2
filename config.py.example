@@ -1,0 +1,7 @@
+# config.template.py
+# Copy this file to config.py and fill in your actual API key.
+# config.py is gitignored — do NOT commit it.
+
+DEEPSEEK_API_KEY = "<key here>"
+DEEPSEEK_BASE_URL = "https://api.deepseek.com"
+DEEPSEEK_MODEL = "deepseek-v4-flash"

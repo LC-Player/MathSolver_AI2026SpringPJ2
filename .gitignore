@@ -3,6 +3,7 @@ __pycache__/
 Qwen/
 output/
 .____temp/
+.codeartsdoer/
 
 # Generated submission files (keep the original submit.csv)
 submit_cot_*.csv
@@ -13,6 +14,9 @@ submit_base.csv
 # Generated training data
 train_cot.json
 train_dpo.json
+
+# Secrets
+config.py
 
 # Model cache
 .msc/

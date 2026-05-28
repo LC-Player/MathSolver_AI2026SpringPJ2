@@ -15,7 +15,7 @@ from modelscope import snapshot_download, AutoTokenizer
 from peft import LoraConfig, TaskType
 from transformers import AutoModelForCausalLM
 from trl import DPOConfig, DPOTrainer
-
+import os
 
 def format_dpo_sample(item, tokenizer):
     """Format a single DPO sample into the format expected by DPOTrainer."""
