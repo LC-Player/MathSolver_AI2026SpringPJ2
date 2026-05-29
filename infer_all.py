@@ -66,11 +66,13 @@ def predict(question: str, model, tokenizer, instruction: str, device: str = "cp
         {"role": "system", "content": instruction},
         {"role": "user", "content": question},
     ]
+    print("Tokenizing...")
     text = tokenizer.apply_chat_template(
         messages, tokenize=False, add_generation_prompt=True
     )
     inputs = tokenizer([text], return_tensors="pt").to(device)
-
+    print("Input shape:", inputs.input_ids.shape)
+    print("Calling generate...")
     with torch.no_grad():
         generated_ids = model.generate(
             inputs.input_ids,
@@ -79,6 +81,7 @@ def predict(question: str, model, tokenizer, instruction: str, device: str = "cp
             do_sample=False,
             pad_token_id=tokenizer.pad_token_id,
         )
+        print("Generate finished")
     output_ids = generated_ids[0][len(inputs.input_ids[0]):]
     response = tokenizer.decode(output_ids, skip_special_tokens=True)
     return response
