@@ -35,6 +35,8 @@ def load_base_model(model_dir: str, device: str = "cpu"):
     tokenizer = AutoTokenizer.from_pretrained(
         model_dir, use_fast=False, trust_remote_code=True
     )
+    if tokenizer.pad_token_id is None:
+        tokenizer.add_special_tokens({'pad_token': '<|pad|>'})
     model = AutoModelForCausalLM.from_pretrained(
         model_dir, device_map=device, torch_dtype=torch.float32,
         trust_remote_code=True
@@ -47,6 +49,8 @@ def load_lora_model(model_dir: str, lora_path: str, device: str = "cpu"):
     tokenizer = AutoTokenizer.from_pretrained(
         model_dir, use_fast=False, trust_remote_code=True
     )
+    if tokenizer.pad_token_id is None:
+        tokenizer.add_special_tokens({'pad_token': '<|pad|>'})
     model = AutoModelForCausalLM.from_pretrained(
         model_dir, device_map=device, torch_dtype=torch.float32,
         trust_remote_code=True
@@ -70,6 +74,7 @@ def predict(question: str, model, tokenizer, instruction: str, device: str = "cp
     with torch.no_grad():
         generated_ids = model.generate(
             inputs.input_ids,
+            attention_mask=inputs.attention_mask,
             max_new_tokens=max_new_tokens,
             do_sample=False,
             pad_token_id=tokenizer.pad_token_id,

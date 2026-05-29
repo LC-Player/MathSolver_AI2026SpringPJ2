@@ -21,3 +21,4 @@ config.py
 # Model cache
 .msc/
 .mdl
+.ipynb_checkpoints/

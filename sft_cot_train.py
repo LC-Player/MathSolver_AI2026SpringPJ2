@@ -15,6 +15,7 @@ from peft import LoraConfig, TaskType, get_peft_model
 from transformers import (
     AutoModelForCausalLM, TrainingArguments, Trainer, DataCollatorForSeq2Seq
 )
+from utils import normalize_question
 
 
 def process_func(example, tokenizer, max_length=512):
@@ -79,7 +80,7 @@ def main():
     before = len(cot_data)
     cot_data = [d for d in cot_data
                 if (d.get("reasoning") or "").strip()
-                and (d.get("question") or "").strip()
+                and (normalize_question(d.get("question"))).strip()
                 and (d.get("instruction") or "").strip()
                 and (d.get("answer") or "").strip()]
     if before > len(cot_data):
