@@ -58,7 +58,7 @@ def extract_answer(text: str) -> str:
         candidate = all_numbers[-1]
         return candidate
 
-    return text
+    return ""
 
 
 def load_json(path: str) -> List[dict]:

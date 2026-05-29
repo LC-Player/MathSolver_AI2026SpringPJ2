@@ -10,6 +10,8 @@ submit_cot_*.csv
 submit_sft.csv
 submit_dpo.csv
 submit_base.csv
+cleaned_submit_*.csv
+train_dpo_*.json
 
 # Generated training data
 train_cot.json
