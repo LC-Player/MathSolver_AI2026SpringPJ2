@@ -15,7 +15,10 @@ from modelscope import snapshot_download, AutoTokenizer
 from peft import LoraConfig, TaskType
 from transformers import AutoModelForCausalLM
 from trl import DPOConfig, DPOTrainer
+from datasets import Dataset
 import os
+
+from utils import normalize_question
 
 def format_dpo_sample(item, tokenizer):
     """Format a single DPO sample into the format expected by DPOTrainer."""
@@ -81,15 +84,16 @@ def main():
     dpo_raw = [d for d in dpo_raw
                if (d.get("chosen") or "").strip()
                and (d.get("rejected") or "").strip()
-               and (d.get("question") or "").strip()
+               and (normalize_question(d.get("question"))).strip()
                and (d.get("instruction") or "").strip()]
     if before > len(dpo_raw):
         print(f"Filtered {before - len(dpo_raw)} empty/incomplete samples")
 
     if args.max_samples:
         dpo_raw = dpo_raw[:args.max_samples]
-
-    train_dataset = [format_dpo_sample(item, tokenizer) for item in dpo_raw]
+        
+    train_data_list = [format_dpo_sample(item, tokenizer) for item in dpo_raw]
+    train_dataset = Dataset.from_list(train_data_list) 
     print(f"Training on {len(train_dataset)} DPO pairs")
 
     dpo_config = DPOConfig(
@@ -102,7 +106,6 @@ def main():
         learning_rate=args.learning_rate,
         report_to="none",
         max_length=args.max_length,
-        max_prompt_length=args.max_length // 2,
         beta=0.1,
         bf16=(args.device == "auto"),
         gradient_checkpointing=(args.device == "auto"),
